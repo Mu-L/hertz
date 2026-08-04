@@ -239,6 +239,71 @@ func TestToHertzError(t *testing.T) {
 	assert.DeepEqual(t, other, conn.ToHertzError(other))
 }
 
+func TestConnIsHealthy(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+	defer clientConn.Close()
+
+	conn := newConn(clientConn, 0).(*Conn)
+	assert.True(t, conn.IsHealthy(time.Millisecond, time.Second))
+
+	writeDone := make(chan error, 1)
+	go func() {
+		_, err := serverConn.Write([]byte("x"))
+		writeDone <- err
+	}()
+	b, err := conn.Peek(1)
+	assert.Nil(t, err)
+	assert.DeepEqual(t, []byte("x"), b)
+	assert.Nil(t, <-writeDone)
+	assert.Nil(t, conn.Skip(1))
+	assert.Nil(t, conn.Release())
+
+	assert.Nil(t, serverConn.Close())
+	assert.DeepEqual(t, false, conn.IsHealthy(time.Millisecond, time.Second))
+
+	t.Run("unexpected data", func(t *testing.T) {
+		serverConn, clientConn := net.Pipe()
+		defer serverConn.Close()
+		defer clientConn.Close()
+
+		conn := newConn(clientConn, 0).(*Conn)
+		writeDone := make(chan error, 1)
+		go func() {
+			_, err := serverConn.Write([]byte("x"))
+			writeDone <- err
+		}()
+		assert.DeepEqual(t, false, conn.IsHealthy(time.Second, time.Second))
+		assert.Nil(t, <-writeDone)
+		b, err := conn.Peek(1)
+		assert.Nil(t, err)
+		assert.DeepEqual(t, []byte("x"), b)
+	})
+
+	t.Run("buffered data", func(t *testing.T) {
+		serverConn, clientConn := net.Pipe()
+		defer serverConn.Close()
+		defer clientConn.Close()
+
+		conn := newConn(clientConn, 0).(*Conn)
+		writeDone := make(chan error, 1)
+		go func() {
+			_, err := serverConn.Write([]byte("x"))
+			writeDone <- err
+		}()
+		b, err := conn.Peek(1)
+		assert.Nil(t, err)
+		assert.DeepEqual(t, []byte("x"), b)
+		assert.Nil(t, <-writeDone)
+
+		assert.DeepEqual(t, false, conn.IsHealthy(time.Millisecond, time.Second))
+		b, err = conn.Peek(1)
+		assert.Nil(t, err)
+		assert.DeepEqual(t, []byte("x"), b)
+	})
+
+}
+
 func TestHandleSpecificError(t *testing.T) {
 	conn := &Conn{}
 	assert.DeepEqual(t, false, conn.HandleSpecificError(nil, ""))

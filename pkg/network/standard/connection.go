@@ -33,11 +33,17 @@ import (
 	"github.com/cloudwego/hertz/pkg/network"
 )
 
+type connHealthChecker interface {
+	isHealthy() bool
+}
+
 type Conn struct {
-	c      net.Conn
-	br     *bufiox.DefaultReader
-	bw     *bufiox.DefaultWriter
-	stater connstate.ConnStater
+	c             net.Conn
+	br            *bufiox.DefaultReader
+	bw            *bufiox.DefaultWriter
+	stater        connstate.ConnStater
+	healthChecker connHealthChecker
+	readerSize    int
 
 	buf [8]byte
 }
@@ -65,6 +71,43 @@ func (c *Conn) SetReadTimeout(t time.Duration) error {
 		return c.c.SetReadDeadline(time.Time{})
 	}
 	return c.c.SetReadDeadline(time.Now().Add(t))
+}
+
+// IsHealthy checks whether the peer has closed the connection without
+// consuming data from the buffered reader used by the HTTP protocol.
+func (c *Conn) IsHealthy(probeTimeout, _ time.Duration) bool {
+	if c == nil || c.c == nil || probeTimeout <= 0 || c.Len() > 0 {
+		return false
+	}
+	if c.healthChecker != nil {
+		return c.healthChecker.isHealthy()
+	}
+	return c.isHealthyWithTimedPeek(probeTimeout)
+}
+
+func (c *Conn) isHealthyWithTimedPeek(timeout time.Duration) bool {
+	if err := c.SetReadTimeout(timeout); err != nil {
+		return false
+	}
+	p, err := c.Peek(1)
+	if resetErr := c.SetReadTimeout(0); resetErr != nil {
+		return false
+	}
+	if len(p) != 0 {
+		return false
+	}
+	var timeoutErr net.Error
+	if !errors.As(err, &timeoutErr) || !timeoutErr.Timeout() {
+		return false
+	}
+	// DefaultReader intentionally retains read errors. A successful timeout
+	// probe has no buffered data, so release its empty buffer and replace the
+	// reader before the connection is returned to the protocol.
+	if err := c.br.Release(nil); err != nil {
+		return false
+	}
+	c.br = bufiox.NewDefaultReaderSize(c.c, c.readerSize)
+	return true
 }
 
 type TLSConn struct {
@@ -237,18 +280,21 @@ func (c *TLSConn) ConnectionState() tls.ConnectionState {
 
 func newConn(c net.Conn, size int) network.Conn {
 	return &Conn{
-		c:  c,
-		br: bufiox.NewDefaultReaderSize(c, size),
-		bw: bufiox.NewDefaultWriter(c),
+		c:             c,
+		br:            bufiox.NewDefaultReaderSize(c, size),
+		bw:            bufiox.NewDefaultWriter(c),
+		healthChecker: newTCPHealthChecker(c),
+		readerSize:    size,
 	}
 }
 
 func newTLSConn(c net.Conn, size int) network.Conn {
 	return &TLSConn{
 		Conn{
-			c:  c,
-			br: bufiox.NewDefaultReaderSize(c, size),
-			bw: bufiox.NewDefaultWriter(c),
+			c:          c,
+			br:         bufiox.NewDefaultReaderSize(c, size),
+			bw:         bufiox.NewDefaultWriter(c),
+			readerSize: size,
 		},
 	}
 }
